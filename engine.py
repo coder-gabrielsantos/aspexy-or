@@ -21,8 +21,10 @@ class IEMASolver:
         board_config: Dict[str, Any],
         assignments: Sequence[Dict[str, Any]],
         teacher_unavailability: Dict[str, Dict[str, List[int]]] | None = None,
+        teacher_preference: Dict[str, Dict[str, List[int]]] | None = None,
         max_daily_same_subject: int = 2,
         time_limit_seconds: float = 10.0,
+        preference_weight: int = 3,
     ) -> None:
         self.board_config = board_config
         expanded_assignments = self._expand_assignments_input(assignments)
@@ -30,8 +32,10 @@ class IEMASolver:
             self._normalize_assignment(item) for item in expanded_assignments
         ]
         self.teacher_unavailability = teacher_unavailability or {}
+        self.teacher_preference = teacher_preference or {}
         self.max_daily_same_subject = max_daily_same_subject
         self.time_limit_seconds = time_limit_seconds
+        self.preference_weight = max(1, int(preference_weight))
 
         self.config = self.board_config["config"]
         self.days: List[str] = self.config["days"]
@@ -50,6 +54,8 @@ class IEMASolver:
         self.model = cp_model.CpModel()
         self.aula: Dict[Tuple[int, int, int], cp_model.IntVar] = {}
         self.pair_vars: List[cp_model.IntVar] = []
+        self.pref_score_terms: List[cp_model.IntVar] = []
+        self._maximized_objective = False
 
     @staticmethod
     def _expand_assignments_input(raw_assignments: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -206,7 +212,7 @@ class IEMASolver:
                     if key in self.aula:
                         self.model.Add(self.aula[key] == 0)
 
-    def _add_consecutive_pair_preference(self) -> None:
+    def _add_consecutive_pair_variables(self) -> None:
         for a_idx, _assignment in enumerate(self.assignments):
             for day_idx in range(len(self.days)):
                 slots = self.valid_slots_by_day[day_idx]
@@ -223,8 +229,41 @@ class IEMASolver:
                     self.model.Add(pair >= x1 + x2 - 1)
                     self.pair_vars.append(pair)
 
+    def _collect_teacher_preference_terms(self) -> None:
+        """Variáveis de aula em slots marcados como preferência pelo professor (objetivo mole)."""
+        self.pref_score_terms = []
+        for a_idx, assignment in enumerate(self.assignments):
+            teacher_pref = self.teacher_preference.get(assignment.teacher, {})
+            for day_str, pref_slots in teacher_pref.items():
+                try:
+                    day_idx = int(day_str)
+                except ValueError:
+                    continue
+                for slot in pref_slots:
+                    key = (a_idx, day_idx, slot)
+                    if key in self.aula:
+                        self.pref_score_terms.append(self.aula[key])
+
+    def _set_combined_objective(self) -> None:
+        self._add_consecutive_pair_variables()
+        self._collect_teacher_preference_terms()
+
+        parts: List[Any] = []
         if self.pair_vars:
-            self.model.Maximize(sum(self.pair_vars))
+            parts.append(sum(self.pair_vars))
+        if self.pref_score_terms:
+            parts.append(self.preference_weight * sum(self.pref_score_terms))
+
+        if not parts:
+            return
+
+        if len(parts) == 1:
+            expr = parts[0]
+        else:
+            expr = parts[0] + parts[1]
+
+        self.model.Maximize(expr)
+        self._maximized_objective = True
 
     def _build_model(self) -> None:
         self._build_variables()
@@ -232,7 +271,7 @@ class IEMASolver:
         self._add_weekly_load_constraints()
         self._add_daily_limit_constraints()
         self._add_teacher_unavailability_constraints()
-        self._add_consecutive_pair_preference()
+        self._set_combined_objective()
 
     def _extract_solution(self, solver: cp_model.CpSolver, status: int) -> Dict[str, Any]:
         status_name = solver.StatusName(status)
@@ -301,8 +340,8 @@ class IEMASolver:
                 flat_allocations, key=lambda x: (x["day_index"], x["slot_index"], x["class_id"])
             ),
         }
-        if self.pair_vars:
-            result["pair_preference_score"] = int(solver.ObjectiveValue())
+        if self._maximized_objective:
+            result["objective_value"] = int(solver.ObjectiveValue())
         return result
 
     def solve(self) -> Dict[str, Any]:
@@ -319,8 +358,10 @@ def run_solve(payload: Dict[str, Any]) -> Dict[str, Any]:
     board = payload.get("schoolProfile")
     assignments = payload.get("assignments")
     teacher_unavailability = payload.get("teacherUnavailability", {})
+    teacher_preference = payload.get("teacherPreference", {})
     max_daily_same_subject = int(payload.get("maxDailySameSubject", 2))
     time_limit_seconds = float(payload.get("timeLimitSeconds", 10.0))
+    preference_weight = int(payload.get("teacherPreferenceWeight", 3))
 
     if not isinstance(board, dict):
         raise ValueError("Campo 'schoolProfile' é obrigatório.")
@@ -328,13 +369,17 @@ def run_solve(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError("Campo 'assignments' deve ser uma lista.")
     if not isinstance(teacher_unavailability, dict):
         teacher_unavailability = {}
+    if not isinstance(teacher_preference, dict):
+        teacher_preference = {}
 
     solver = IEMASolver(
         board_config=board,
         assignments=assignments,
         teacher_unavailability=teacher_unavailability,
+        teacher_preference=teacher_preference,
         max_daily_same_subject=max_daily_same_subject,
         time_limit_seconds=time_limit_seconds,
+        preference_weight=preference_weight,
     )
     return solver.solve()
 

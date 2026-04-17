@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from engine import run_solve
 
-app = FastAPI(title="Aspexy OR Solver", version="1.0.0")
+app = FastAPI(title="Aspexy OR Solver", version="1.1.0")
 
 _cors_raw = os.getenv("CORS_ORIGINS", "*")
 _cors_origins = [o.strip() for o in _cors_raw.split(",") if o.strip()] or ["*"]

@@ -5,7 +5,8 @@ Serviço HTTP com [OR-Tools](https://developers.google.com/optimization) (CP-SAT
 ## Endpoints
 
 - `GET /health` — health check
-- `POST /solve` — mesmo JSON que o Next enviava ao script Python (`schoolProfile`, `assignments`, `teacherUnavailability`, etc.)
+- `POST /solve` — mesmo JSON que o Next envia (`schoolProfile`, `assignments`, `teacherUnavailability`, `teacherPreference` opcional, etc.)
+
 
 ## Local
 
