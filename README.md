@@ -5,7 +5,7 @@ Serviço HTTP com [OR-Tools](https://developers.google.com/optimization) (CP-SAT
 ## Endpoints
 
 - `GET /health` — health check
-- `POST /solve` — mesmo JSON que o Next envia (`schoolProfile`, `assignments`, `teacherUnavailability`, `teacherPreference` opcional, `teacherMutexGroups` opcional — lista de `{ "teachers": ["Nome1", "Nome2", ...] }` (no máximo um por slot); legado: `teacherMutexPairs` com `{ "teacherA", "teacherB" }`, etc.)
+- `POST /solve` — mesmo JSON que o Next envia (`schoolProfile`, `assignments`, `teacherUnavailability`, `teacherPreference` opcional, `teacherMutexGroups` opcional — lista de `{ "teachers": ["Nome1", "Nome2", ...] }` (no máximo um por slot); legado: `teacherMutexPairs` com `{ "teacherA", "teacherB" }`, etc.). Opcionais: `maxLessonsPerDayPerTeacher` (padrão 6), `teacherMaxLessonsPerDay` (mapa nome → inteiro, sobrescreve o padrão), `maxConsecutiveLessonsPerClass` (0 = desligado; em sequências de slots de aula consecutivos, no máximo N aulas seguidas para a mesma turma).
 
 
 ## Local

@@ -75,6 +75,9 @@ class IEMASolver:
         teacher_preference: Dict[str, Dict[str, List[int]]] | None = None,
         teacher_mutex_groups: Sequence[Sequence[str]] | None = None,
         max_daily_same_subject: int = 2,
+        max_lessons_per_day_per_teacher: int = 99,
+        teacher_max_lessons_per_day: Dict[str, int] | None = None,
+        max_consecutive_lessons_per_class: int = 0,
         time_limit_seconds: float = 10.0,
         preference_weight: int = 3,
     ) -> None:
@@ -92,6 +95,20 @@ class IEMASolver:
                 normalized_mutex_groups.append(names)
         self.teacher_mutex_groups = normalized_mutex_groups
         self.max_daily_same_subject = max_daily_same_subject
+        self.max_lessons_per_day_per_teacher = max(1, int(max_lessons_per_day_per_teacher))
+        raw_teacher_caps = teacher_max_lessons_per_day or {}
+        self.teacher_max_lessons_per_day: Dict[str, int] = {}
+        for name, cap in raw_teacher_caps.items():
+            key = str(name).strip()
+            if not key:
+                continue
+            try:
+                c = int(cap)
+            except (TypeError, ValueError):
+                continue
+            if c >= 1:
+                self.teacher_max_lessons_per_day[key] = c
+        self.max_consecutive_lessons_per_class = max(0, int(max_consecutive_lessons_per_class))
         self.time_limit_seconds = time_limit_seconds
         self.preference_weight = max(1, int(preference_weight))
 
@@ -270,6 +287,65 @@ class IEMASolver:
                     if key in self.aula:
                         self.model.Add(self.aula[key] == 0)
 
+    def _consecutive_lesson_slot_runs(self, day_idx: int) -> List[List[int]]:
+        slots = self.valid_slots_by_day[day_idx]
+        if not slots:
+            return []
+        runs: List[List[int]] = []
+        current: List[int] = [slots[0]]
+        for i in range(1, len(slots)):
+            if slots[i] == slots[i - 1] + 1:
+                current.append(slots[i])
+            else:
+                runs.append(current)
+                current = [slots[i]]
+        runs.append(current)
+        return runs
+
+    def _add_teacher_daily_max_constraints(self) -> None:
+        """No maximo N aulas por dia por professor (N global ou por professor)."""
+        all_teachers = sorted({a.teacher for a in self.assignments})
+        for teacher in all_teachers:
+            cap = self.teacher_max_lessons_per_day.get(teacher, self.max_lessons_per_day_per_teacher)
+            if cap < 1:
+                continue
+            for day_idx in range(len(self.days)):
+                vars_day = [
+                    self.aula[(a_idx, day_idx, slot)]
+                    for a_idx, assignment in enumerate(self.assignments)
+                    if assignment.teacher == teacher
+                    for slot in self.valid_slots_by_day[day_idx]
+                    if (a_idx, day_idx, slot) in self.aula
+                ]
+                if vars_day:
+                    self.model.Add(sum(vars_day) <= cap)
+
+    def _add_class_max_consecutive_constraints(self) -> None:
+        """Em cada sequencia de slots de aula consecutivos, a turma nao pode ter mais de M aulas seguidas."""
+        m = self.max_consecutive_lessons_per_class
+        if m < 1:
+            return
+        window = m + 1
+        all_classes = sorted({a.class_id for a in self.assignments})
+        for class_id in all_classes:
+            a_indices = [a_idx for a_idx, a in enumerate(self.assignments) if a.class_id == class_id]
+            if not a_indices:
+                continue
+            for day_idx in range(len(self.days)):
+                for run in self._consecutive_lesson_slot_runs(day_idx):
+                    if len(run) < window:
+                        continue
+                    for start in range(len(run) - window + 1):
+                        slice_slots = run[start : start + window]
+                        vars_w: List[cp_model.IntVar] = []
+                        for slot in slice_slots:
+                            for a_idx in a_indices:
+                                key = (a_idx, day_idx, slot)
+                                if key in self.aula:
+                                    vars_w.append(self.aula[key])
+                        if vars_w:
+                            self.model.Add(sum(vars_w) <= m)
+
     def _add_teacher_mutex_constraints(self) -> None:
         """Por grupo: no maximo um professor do conjunto leciona no mesmo dia e slot."""
         for group in self.teacher_mutex_groups:
@@ -347,6 +423,8 @@ class IEMASolver:
         self._add_daily_limit_constraints()
         self._add_teacher_unavailability_constraints()
         self._add_teacher_mutex_constraints()
+        self._add_teacher_daily_max_constraints()
+        self._add_class_max_consecutive_constraints()
         self._set_combined_objective()
 
     def _extract_solution(self, solver: cp_model.CpSolver, status: int) -> Dict[str, Any]:
@@ -441,8 +519,23 @@ def run_solve(payload: Dict[str, Any]) -> Dict[str, Any]:
             [a, b] for a, b in _normalize_teacher_mutex_pairs(payload.get("teacherMutexPairs"))
         ]
     max_daily_same_subject = int(payload.get("maxDailySameSubject", 2))
+    max_lessons_per_day_per_teacher = int(payload.get("maxLessonsPerDayPerTeacher", 6))
+    max_consecutive_lessons_per_class = int(payload.get("maxConsecutiveLessonsPerClass", 0))
     time_limit_seconds = float(payload.get("timeLimitSeconds", 10.0))
     preference_weight = int(payload.get("teacherPreferenceWeight", 3))
+
+    teacher_max_lessons_per_day: Dict[str, int] = {}
+    raw_caps = payload.get("teacherMaxLessonsPerDay")
+    if isinstance(raw_caps, dict):
+        for k, v in raw_caps.items():
+            if not isinstance(k, str):
+                continue
+            try:
+                c = int(v)
+            except (TypeError, ValueError):
+                continue
+            if c >= 1:
+                teacher_max_lessons_per_day[k.strip()] = c
 
     if not isinstance(board, dict):
         raise ValueError("Campo 'schoolProfile' é obrigatório.")
@@ -460,6 +553,9 @@ def run_solve(payload: Dict[str, Any]) -> Dict[str, Any]:
         teacher_preference=teacher_preference,
         teacher_mutex_groups=teacher_mutex_groups,
         max_daily_same_subject=max_daily_same_subject,
+        max_lessons_per_day_per_teacher=max_lessons_per_day_per_teacher,
+        teacher_max_lessons_per_day=teacher_max_lessons_per_day,
+        max_consecutive_lessons_per_class=max_consecutive_lessons_per_class,
         time_limit_seconds=time_limit_seconds,
         preference_weight=preference_weight,
     )
