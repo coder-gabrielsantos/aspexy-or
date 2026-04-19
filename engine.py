@@ -15,6 +15,27 @@ class Assignment:
     weekly_load: int
 
 
+def _normalize_teacher_mutex_pairs(raw: Any) -> List[Tuple[str, str]]:
+    """Lista de pares (nome, nome) únicos; professores distintos."""
+    out: List[Tuple[str, str]] = []
+    seen: set[str] = set()
+    if not isinstance(raw, list):
+        return out
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        a = str(item.get("teacherA", "")).strip()
+        b = str(item.get("teacherB", "")).strip()
+        if not a or not b or a == b:
+            continue
+        key = "\0".join(sorted((a, b)))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((a, b))
+    return out
+
+
 class IEMASolver:
     def __init__(
         self,
@@ -22,6 +43,7 @@ class IEMASolver:
         assignments: Sequence[Dict[str, Any]],
         teacher_unavailability: Dict[str, Dict[str, List[int]]] | None = None,
         teacher_preference: Dict[str, Dict[str, List[int]]] | None = None,
+        teacher_mutex_pairs: Sequence[Tuple[str, str]] | None = None,
         max_daily_same_subject: int = 2,
         time_limit_seconds: float = 10.0,
         preference_weight: int = 3,
@@ -33,6 +55,7 @@ class IEMASolver:
         ]
         self.teacher_unavailability = teacher_unavailability or {}
         self.teacher_preference = teacher_preference or {}
+        self.teacher_mutex_pairs: List[Tuple[str, str]] = list(teacher_mutex_pairs or [])
         self.max_daily_same_subject = max_daily_same_subject
         self.time_limit_seconds = time_limit_seconds
         self.preference_weight = max(1, int(preference_weight))
@@ -212,6 +235,28 @@ class IEMASolver:
                     if key in self.aula:
                         self.model.Add(self.aula[key] == 0)
 
+    def _add_teacher_mutex_constraints(self) -> None:
+        """Dois professores do par não podem lecionar no mesmo dia e slot."""
+        for name_a, name_b in self.teacher_mutex_pairs:
+            na, nb = name_a.strip(), name_b.strip()
+            if not na or not nb or na == nb:
+                continue
+            for day_idx in range(len(self.days)):
+                for slot in self.valid_slots_by_day[day_idx]:
+                    vars_a = [
+                        self.aula[(a_idx, day_idx, slot)]
+                        for a_idx, assignment in enumerate(self.assignments)
+                        if assignment.teacher == na and (a_idx, day_idx, slot) in self.aula
+                    ]
+                    vars_b = [
+                        self.aula[(a_idx, day_idx, slot)]
+                        for a_idx, assignment in enumerate(self.assignments)
+                        if assignment.teacher == nb and (a_idx, day_idx, slot) in self.aula
+                    ]
+                    if not vars_a or not vars_b:
+                        continue
+                    self.model.Add(sum(vars_a) + sum(vars_b) <= 1)
+
     def _add_consecutive_pair_variables(self) -> None:
         for a_idx, _assignment in enumerate(self.assignments):
             for day_idx in range(len(self.days)):
@@ -271,6 +316,7 @@ class IEMASolver:
         self._add_weekly_load_constraints()
         self._add_daily_limit_constraints()
         self._add_teacher_unavailability_constraints()
+        self._add_teacher_mutex_constraints()
         self._set_combined_objective()
 
     def _extract_solution(self, solver: cp_model.CpSolver, status: int) -> Dict[str, Any]:
@@ -359,6 +405,7 @@ def run_solve(payload: Dict[str, Any]) -> Dict[str, Any]:
     assignments = payload.get("assignments")
     teacher_unavailability = payload.get("teacherUnavailability", {})
     teacher_preference = payload.get("teacherPreference", {})
+    teacher_mutex_pairs = _normalize_teacher_mutex_pairs(payload.get("teacherMutexPairs"))
     max_daily_same_subject = int(payload.get("maxDailySameSubject", 2))
     time_limit_seconds = float(payload.get("timeLimitSeconds", 10.0))
     preference_weight = int(payload.get("teacherPreferenceWeight", 3))
@@ -377,6 +424,7 @@ def run_solve(payload: Dict[str, Any]) -> Dict[str, Any]:
         assignments=assignments,
         teacher_unavailability=teacher_unavailability,
         teacher_preference=teacher_preference,
+        teacher_mutex_pairs=teacher_mutex_pairs,
         max_daily_same_subject=max_daily_same_subject,
         time_limit_seconds=time_limit_seconds,
         preference_weight=preference_weight,
