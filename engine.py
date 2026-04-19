@@ -16,7 +16,7 @@ class Assignment:
 
 
 def _normalize_teacher_mutex_pairs(raw: Any) -> List[Tuple[str, str]]:
-    """Lista de pares (nome, nome) únicos; professores distintos."""
+    """Legado: pares (nome, nome) únicos."""
     out: List[Tuple[str, str]] = []
     seen: set[str] = set()
     if not isinstance(raw, list):
@@ -36,6 +36,36 @@ def _normalize_teacher_mutex_pairs(raw: Any) -> List[Tuple[str, str]]:
     return out
 
 
+def _normalize_teacher_mutex_groups(raw: Any) -> List[List[str]]:
+    """Listas de nomes: em cada grupo, no maximo um professor leciona no mesmo (dia, slot)."""
+    out: List[List[str]] = []
+    seen: set[str] = set()
+    if not isinstance(raw, list):
+        return out
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        teachers = item.get("teachers")
+        if not isinstance(teachers, list):
+            continue
+        names: List[str] = []
+        seen_n: set[str] = set()
+        for t in teachers:
+            s = str(t).strip()
+            if not s or s in seen_n:
+                continue
+            seen_n.add(s)
+            names.append(s)
+        if len(names) < 2:
+            continue
+        key = "\0".join(sorted(names))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(names)
+    return out
+
+
 class IEMASolver:
     def __init__(
         self,
@@ -43,7 +73,7 @@ class IEMASolver:
         assignments: Sequence[Dict[str, Any]],
         teacher_unavailability: Dict[str, Dict[str, List[int]]] | None = None,
         teacher_preference: Dict[str, Dict[str, List[int]]] | None = None,
-        teacher_mutex_pairs: Sequence[Tuple[str, str]] | None = None,
+        teacher_mutex_groups: Sequence[Sequence[str]] | None = None,
         max_daily_same_subject: int = 2,
         time_limit_seconds: float = 10.0,
         preference_weight: int = 3,
@@ -55,7 +85,12 @@ class IEMASolver:
         ]
         self.teacher_unavailability = teacher_unavailability or {}
         self.teacher_preference = teacher_preference or {}
-        self.teacher_mutex_pairs: List[Tuple[str, str]] = list(teacher_mutex_pairs or [])
+        normalized_mutex_groups: List[List[str]] = []
+        for g in teacher_mutex_groups or []:
+            names = [str(n).strip() for n in g if str(n).strip()]
+            if len(names) >= 2:
+                normalized_mutex_groups.append(names)
+        self.teacher_mutex_groups = normalized_mutex_groups
         self.max_daily_same_subject = max_daily_same_subject
         self.time_limit_seconds = time_limit_seconds
         self.preference_weight = max(1, int(preference_weight))
@@ -236,26 +271,21 @@ class IEMASolver:
                         self.model.Add(self.aula[key] == 0)
 
     def _add_teacher_mutex_constraints(self) -> None:
-        """Dois professores do par não podem lecionar no mesmo dia e slot."""
-        for name_a, name_b in self.teacher_mutex_pairs:
-            na, nb = name_a.strip(), name_b.strip()
-            if not na or not nb or na == nb:
+        """Por grupo: no maximo um professor do conjunto leciona no mesmo dia e slot."""
+        for group in self.teacher_mutex_groups:
+            names = frozenset(group)
+            if len(names) < 2:
                 continue
             for day_idx in range(len(self.days)):
                 for slot in self.valid_slots_by_day[day_idx]:
-                    vars_a = [
+                    vars_g = [
                         self.aula[(a_idx, day_idx, slot)]
                         for a_idx, assignment in enumerate(self.assignments)
-                        if assignment.teacher == na and (a_idx, day_idx, slot) in self.aula
+                        if assignment.teacher in names and (a_idx, day_idx, slot) in self.aula
                     ]
-                    vars_b = [
-                        self.aula[(a_idx, day_idx, slot)]
-                        for a_idx, assignment in enumerate(self.assignments)
-                        if assignment.teacher == nb and (a_idx, day_idx, slot) in self.aula
-                    ]
-                    if not vars_a or not vars_b:
+                    if len(vars_g) < 2:
                         continue
-                    self.model.Add(sum(vars_a) + sum(vars_b) <= 1)
+                    self.model.Add(sum(vars_g) <= 1)
 
     def _add_consecutive_pair_variables(self) -> None:
         for a_idx, _assignment in enumerate(self.assignments):
@@ -405,7 +435,11 @@ def run_solve(payload: Dict[str, Any]) -> Dict[str, Any]:
     assignments = payload.get("assignments")
     teacher_unavailability = payload.get("teacherUnavailability", {})
     teacher_preference = payload.get("teacherPreference", {})
-    teacher_mutex_pairs = _normalize_teacher_mutex_pairs(payload.get("teacherMutexPairs"))
+    teacher_mutex_groups = _normalize_teacher_mutex_groups(payload.get("teacherMutexGroups"))
+    if not teacher_mutex_groups:
+        teacher_mutex_groups = [
+            [a, b] for a, b in _normalize_teacher_mutex_pairs(payload.get("teacherMutexPairs"))
+        ]
     max_daily_same_subject = int(payload.get("maxDailySameSubject", 2))
     time_limit_seconds = float(payload.get("timeLimitSeconds", 10.0))
     preference_weight = int(payload.get("teacherPreferenceWeight", 3))
@@ -424,7 +458,7 @@ def run_solve(payload: Dict[str, Any]) -> Dict[str, Any]:
         assignments=assignments,
         teacher_unavailability=teacher_unavailability,
         teacher_preference=teacher_preference,
-        teacher_mutex_pairs=teacher_mutex_pairs,
+        teacher_mutex_groups=teacher_mutex_groups,
         max_daily_same_subject=max_daily_same_subject,
         time_limit_seconds=time_limit_seconds,
         preference_weight=preference_weight,
