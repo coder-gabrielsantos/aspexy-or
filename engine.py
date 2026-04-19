@@ -2,7 +2,7 @@ import json
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Sequence, Set, Tuple
 
 from ortools.sat.python import cp_model
 
@@ -77,7 +77,7 @@ class IEMASolver:
         max_daily_same_subject: int = 2,
         max_lessons_per_day_per_teacher: int = 99,
         teacher_max_lessons_per_day: Dict[str, int] | None = None,
-        max_consecutive_lessons_per_class: int = 0,
+        max_consecutive_lessons_per_class: int = 0,  # M aulas seguidas: mesmo professor com a mesma turma (0=off)
         time_limit_seconds: float = 10.0,
         preference_weight: int = 3,
     ) -> None:
@@ -320,15 +320,24 @@ class IEMASolver:
                 if vars_day:
                     self.model.Add(sum(vars_day) <= cap)
 
-    def _add_class_max_consecutive_constraints(self) -> None:
-        """Em cada sequencia de slots de aula consecutivos, a turma nao pode ter mais de M aulas seguidas."""
+    def _add_teacher_class_max_consecutive_constraints(self) -> None:
+        """Em cada sequencia de slots de aula consecutivos, cada par (professor, turma)
+        nao pode ter mais de M aulas seguidas (o mesmo professor com a mesma turma)."""
         m = self.max_consecutive_lessons_per_class
         if m < 1:
             return
         window = m + 1
-        all_classes = sorted({a.class_id for a in self.assignments})
-        for class_id in all_classes:
-            a_indices = [a_idx for a_idx, a in enumerate(self.assignments) if a.class_id == class_id]
+        pairs: List[Tuple[str, str]] = []
+        seen: Set[Tuple[str, str]] = set()
+        for a in self.assignments:
+            key = (a.teacher, a.class_id)
+            if key not in seen:
+                seen.add(key)
+                pairs.append(key)
+        for teacher, class_id in pairs:
+            a_indices = [
+                a_idx for a_idx, a in enumerate(self.assignments) if a.teacher == teacher and a.class_id == class_id
+            ]
             if not a_indices:
                 continue
             for day_idx in range(len(self.days)):
@@ -424,7 +433,7 @@ class IEMASolver:
         self._add_teacher_unavailability_constraints()
         self._add_teacher_mutex_constraints()
         self._add_teacher_daily_max_constraints()
-        self._add_class_max_consecutive_constraints()
+        self._add_teacher_class_max_consecutive_constraints()
         self._set_combined_objective()
 
     def _extract_solution(self, solver: cp_model.CpSolver, status: int) -> Dict[str, Any]:
